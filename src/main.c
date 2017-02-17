@@ -30,9 +30,15 @@
 #include "debug.h"
 #include "tictoc.h"
 #include "ws2801.h"
+#include "MP45DT02.h"
+#include "pdm2pcm.h"
+#include "fifo.h"
 #include "constants.h"
 
 #define FPS 100
+
+#define AUDIO_BUFFER_SIZE 48
+#define SAMPLE_BUFFER_SIZE 256
 
 volatile uint8_t tick_ms = 1;
 
@@ -139,9 +145,65 @@ static void sinusfader(uint32_t tick_count)
 	ws2801_send_update();
 }
 
+static void musiclight_mono(uint32_t tick_count, float *samples)
+{
+	static float v[WS2801_NUM_MODULES];
+
+	static float maxrms = 1;
+
+	float avg = 0;
+	float rms = 0;
+
+	(void)tick_count; // avoid unused parameter warning
+
+	// step 1: calculate average
+	for(uint32_t i = 0; i < SAMPLE_BUFFER_SIZE; i++) {
+		avg += samples[i];
+	}
+
+	avg /= SAMPLE_BUFFER_SIZE;
+
+	// step 2: calculate average
+	for(uint32_t i = 0; i < SAMPLE_BUFFER_SIZE; i++) {
+		float tmp = samples[i] - avg;
+		rms += tmp*tmp;
+	}
+
+	rms /= SAMPLE_BUFFER_SIZE;
+
+	// step 3: shift the value history
+	for(uint8_t i = WS2801_NUM_MODULES-1; i > 0; i--) {
+		v[i] = v[i-1];
+	}
+
+	// step 4: calculate new value
+	maxrms *= 0.999f;
+	if(rms > maxrms) {
+		maxrms = rms;
+	}
+
+	v[0] = rms / maxrms;
+
+	// step 5: assign values to LEDs
+	for(uint8_t i = 0; i < WS2801_NUM_MODULES; i++) {
+		ws2801_set_colour(i, v[i], v[i], v[i]);
+	}
+
+	ws2801_send_update();
+}
+
 int main(void)
 {
 	uint32_t tick_count = 0;
+
+	uint32_t mic_buf0[AUDIO_BUFFER_SIZE], mic_buf1[AUDIO_BUFFER_SIZE];
+	uint32_t *cur_mic_buf = mic_buf0;
+	uint32_t *old_mic_buf = 0;
+
+	float sample_buffer[SAMPLE_BUFFER_SIZE];
+
+	struct fifo_ctx sample_fifo;
+	struct pdm2pcm_ctx pdmctx;
 
 	init_clock();
 	init_gpio();
@@ -150,18 +212,40 @@ int main(void)
 	debug_init();
 	tictoc_init();
 
+	mp45dt02_init(mic_buf0, mic_buf1, AUDIO_BUFFER_SIZE);
+
+	fifo_init(&sample_fifo);
+	pdm2pcm_init(&pdmctx, 128); // downsampling factor -> 24 kHz
+
 	ws2801_init();
 	ws2801_setup_dma();
 
 	debug_send_string("Init complete\r\n");
 
+	mp45dt02_start();
+
 	while (1) {
+		cur_mic_buf = mp45dt02_dma_get_current_buffer() ? mic_buf0 : mic_buf1;
+
+		if( old_mic_buf != cur_mic_buf){
+			pdm2pcm_decode_to_fifo(&pdmctx, cur_mic_buf, AUDIO_BUFFER_SIZE, &sample_fifo);
+
+			if(fifo_get_level(&sample_fifo) >= SAMPLE_BUFFER_SIZE) {
+				for(uint32_t i = 0; i < SAMPLE_BUFFER_SIZE; i++) {
+					sample_buffer[i] = fifo_pop(&sample_fifo);
+				}
+			}
+
+			old_mic_buf = cur_mic_buf;
+		}
+
 		if(tick_ms == 1) {
 			tick_ms = 0;
 			tick_count++;
 
 			if((tick_count % (1000 / FPS)) == 0) {
-				sinusfader(tick_count);
+				//sinusfader(tick_count);
+				musiclight_mono(tick_count, sample_buffer);
 			}
 		}
 	}
