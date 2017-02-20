@@ -12,8 +12,14 @@ struct pdm2pcm_ctx {
 	uint32_t downsample_ratio;
 	uint32_t downsample_step;
 
-	int32_t x[FILTER_ORDER+1];
-	int32_t y[FILTER_ORDER+1];
+	int32_t cic_accu1;
+	int32_t cic_accu2;
+
+	int32_t cic_comb1_d1;
+	int32_t cic_comb1_d2;
+
+	int32_t cic_comb2_d1;
+	int32_t cic_comb2_d2;
 };
 
 void pdm2pcm_init(struct pdm2pcm_ctx *ctx, uint32_t oversampling_ratio);

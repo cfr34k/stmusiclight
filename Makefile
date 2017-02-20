@@ -31,7 +31,7 @@ LDFLAGS+=--static -lm -lnosys -L$(TOOLCHAIN_DIR)/lib/thumb/cortex-m4/float-abi-h
          -mthumb -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16
 
 # local include dir
-CFLAGS+=-Iinclude
+CFLAGS+=-Isrc
 
 # the LD script
 LDFLAGS+=-Tldscripts/stm32f4-discovery-$(BUILD).ld
@@ -45,7 +45,7 @@ LDFLAGS+=-L$(CM3_DIR)/lib -lopencm3_stm32f4
 CFLAGS_debug=-O0 -ggdb -DDEBUG
 LDFLAGS_debug=
 
-CFLAGS_release=-O3
+CFLAGS_release=-O3 -ggdb
 LDFLAGS_release=
 
 # target configuration

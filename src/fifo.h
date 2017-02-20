@@ -3,7 +3,9 @@
 
 #include <stdint.h>
 
-#define FIFO_DEPTH 512
+#include "config.h"
+
+#define FIFO_DEPTH (FFT_BLOCK_LEN*2)
 
 typedef int32_t fifo_t;
 

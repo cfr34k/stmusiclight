@@ -23,50 +23,83 @@ static inline uint32_t count_bits(uint32_t x)
 
 void pdm2pcm_init(struct pdm2pcm_ctx *ctx, uint32_t oversampling_ratio)
 {
-	ctx->downsample_ratio = (oversampling_ratio + 16) / 32;
-	ctx->downsample_step = 0;
+	ctx->downsample_ratio = (oversampling_ratio + 4) / 8;
+	ctx->downsample_step = ctx->downsample_ratio;
 
+	/*
 	for(int i = 0; i <= FILTER_ORDER; i++) {
 		ctx->x[i] = ctx->y[i] = 0;
 	}
+	*/
 }
 
 uint8_t pdm2pcm_update(struct pdm2pcm_ctx *ctx, uint32_t data_in, int32_t *sample_out)
 {
 	uint8_t sample_generated = 0;
 
-	/*
-	// 18 kHz LPF
-	const int32_t denom[FILTER_ORDER+1] = {16383, -29479, 32171, -18862, 5409};
-	const int32_t numer[FILTER_ORDER+1] = {313, 1252, 1879, 1252, 313};
-	*/
+	// downsampling according to this article:
+	// https://curiouser.cheshireeng.com/2015/01/16/pdm-in-a-tiny-cpu/
+	//
+	// Summary:
+	// 1. sum bits in each byte using a lookup-table (CIC with R=8, M=1, N=1)
+	// 2. CIC with R=downsample_ratio, M=2, N=2
 
-	// 15 kHz LPF
-	const int32_t denom[FILTER_ORDER+1] = {16383, -37382, 42172, -24792, 6481};
-	const int32_t numer[FILTER_ORDER+1] = {159,  638,  957,  638, 159};
+	const int8_t bitsum_lut[256] = {
+		#define S(n) (2*(n)-8)
+		#define B2(n) S(n),  S(n+1),  S(n+1),  S(n+2)
+		#define B4(n) B2(n), B2(n+1), B2(n+1), B2(n+2)
+		#define B6(n) B4(n), B4(n+1), B4(n+1), B4(n+2)
+		B6(0), B6(1), B6(1), B6(2)
+	};
 
-	for(int i = FILTER_ORDER; i>0; i--) {
-		ctx->x[i] = ctx->x[i-1];
-		ctx->y[i] = ctx->y[i-1];
+	// cache variables for faster access
+	int32_t cic_accu1 = ctx->cic_accu1;
+	int32_t cic_accu2 = ctx->cic_accu2;
+
+	int32_t cic_comb1_d1 = ctx->cic_comb1_d1;
+	int32_t cic_comb1_d2 = ctx->cic_comb1_d2;
+
+	int32_t cic_comb2_d1 = ctx->cic_comb2_d1;
+	int32_t cic_comb2_d2 = ctx->cic_comb2_d2;
+
+	uint32_t downsample_step = ctx->downsample_step;
+
+	for(uint32_t s = 0; s < 32; s+=8) {
+		// first integrator
+		cic_accu1 += bitsum_lut[(data_in >> s) & 0xFF];
+
+		// second integrator
+		cic_accu2 += cic_accu1;
+
+		// downsampling
+		if(--(downsample_step) == 0) {
+			downsample_step = ctx->downsample_ratio;
+
+			// first comb stage
+			int32_t cic_comb1_out = cic_accu2 - cic_comb1_d2;
+			cic_comb1_d2 = cic_comb1_d1;
+			cic_comb1_d1 = cic_accu2;
+
+			// second comb stage: assign output
+			*sample_out = cic_comb1_out - cic_comb2_d2;
+			cic_comb2_d2 = cic_comb2_d1;
+			cic_comb2_d1 = cic_comb1_out;
+
+			sample_generated = 1;
+		}
 	}
 
-	ctx->x[0] = (((int32_t)count_bits(data_in) - 16) << 11);
+	// write back cached variables
+	ctx->cic_accu1 = cic_accu1;
+	ctx->cic_accu2 = cic_accu2;
 
-	ctx->y[0] = numer[0] * ctx->x[0];
+	ctx->cic_comb1_d1 = cic_comb1_d1;
+	ctx->cic_comb1_d2 = cic_comb1_d2;
 
-	for(int i = FILTER_ORDER; i>0; i--) {
-		ctx->y[0] += ctx->x[i] * numer[i] - ctx->y[i] * denom[i];
-	}
+	ctx->cic_comb2_d1 = cic_comb2_d1;
+	ctx->cic_comb2_d2 = cic_comb2_d2;
 
-	ctx->y[0] >>= 14;
-
-	ctx->downsample_step++;
-	if(ctx->downsample_step >= ctx->downsample_ratio) {
-		ctx->downsample_step = 0;
-
-		*sample_out = ctx->y[0];
-		sample_generated = 1;
-	}
+	ctx->downsample_step = downsample_step;
 
 	return sample_generated;
 }
@@ -80,7 +113,7 @@ void pdm2pcm_decode_to_fifo(struct pdm2pcm_ctx *ctx, uint32_t *data, size_t data
 		uint32_t word = data[w];
 
 		if(pdm2pcm_update(ctx, word, &sample)) {
-			fifo_push(fifo, sample << 7);
+			fifo_push(fifo, sample << (24-14));
 		}
 	}
 }

@@ -25,6 +25,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <math.h>
 
 #include "debug.h"
@@ -33,6 +34,7 @@
 #include "MP45DT02.h"
 #include "pdm2pcm.h"
 #include "fifo.h"
+#include "fft/fft.h"
 #include "constants.h"
 
 #define FPS 100
@@ -131,8 +133,10 @@ static void init_timer(void)
 	timer_enable_counter(TIM4);
 }
 
-static void sinusfader(uint32_t tick_count)
+static bool sinusfader(uint32_t tick_count, float *samples)
 {
+	(void)samples; // avoid unused parameter warning
+
 	for(uint8_t i = 0; i < WS2801_NUM_MODULES; i++) {
 		float bphase = 2*PI*((float)i/WS2801_NUM_MODULES + tick_count/5000.0f);
 
@@ -143,9 +147,11 @@ static void sinusfader(uint32_t tick_count)
 	}
 
 	ws2801_send_update();
+
+	return false;
 }
 
-static void musiclight_mono(uint32_t tick_count, float *samples)
+static bool musiclight_mono(uint32_t tick_count, float *samples)
 {
 	static float v[WS2801_NUM_MODULES];
 
@@ -190,6 +196,125 @@ static void musiclight_mono(uint32_t tick_count, float *samples)
 	}
 
 	ws2801_send_update();
+
+	return false;
+}
+
+enum MusiclightStep {
+	MS_WINDOW,
+	MS_FFT,
+	MS_FFT_ABS,
+	MS_EXTRACT_ENERGY,
+	MS_UPDATE_COLORS,
+	MS_APPLY
+};
+
+#define MUSICLIGHT_COOLDOWN_FACTOR 0.9995f
+#define MUSICLIGHT_WARMUP_FACTOR 1.0005f
+
+static bool musiclight(uint32_t tick_count, float *samples)
+{
+	static float r[WS2801_NUM_MODULES];
+	static float g[WS2801_NUM_MODULES];
+	static float b[WS2801_NUM_MODULES];
+
+	static float max_r = 1.0f;
+	static float max_g = 1.0f;
+	static float max_b = 1.0f;
+
+	static float min_r = 1.0f;
+	static float min_g = 1.0f;
+	static float min_b = 1.0f;
+
+	static float energy_r = 0;
+	static float energy_g = 0;
+	static float energy_b = 0;
+
+	static fft_sample local_samples[FFT_BLOCK_LEN];
+	static fft_value_type fft_re[FFT_BLOCK_LEN];
+	static fft_value_type fft_im[FFT_BLOCK_LEN];
+	static fft_value_type fft_abs[FFT_DATALEN];
+
+	static enum MusiclightStep cur_step = MS_WINDOW;
+
+	(void)tick_count; // avoid unused parameter warning
+
+	switch(cur_step) {
+		case MS_WINDOW:
+			fft_copy_windowed(samples, local_samples);
+			cur_step = MS_FFT;
+			return true;
+			break;
+
+		case MS_FFT:
+			fft_transform(samples, fft_re, fft_im);
+			cur_step = MS_FFT_ABS;
+			return true;
+			break;
+
+		case MS_FFT_ABS:
+			fft_complex_to_absolute(fft_re, fft_im, fft_abs);
+			cur_step = MS_EXTRACT_ENERGY;
+			return true;
+			break;
+
+		case MS_EXTRACT_ENERGY:
+			energy_r = fft_get_energy_in_band(fft_abs, 0, 400);
+			energy_g = fft_get_energy_in_band(fft_abs, 400, 4000);
+			energy_b = fft_get_energy_in_band(fft_abs, 4000, SAMPLE_RATE/2);
+			cur_step = MS_UPDATE_COLORS;
+			return true;
+			break;
+
+		case MS_UPDATE_COLORS:
+			max_r *= MUSICLIGHT_COOLDOWN_FACTOR;
+			max_g *= MUSICLIGHT_COOLDOWN_FACTOR;
+			max_b *= MUSICLIGHT_COOLDOWN_FACTOR;
+
+			min_r *= MUSICLIGHT_WARMUP_FACTOR;
+			min_g *= MUSICLIGHT_WARMUP_FACTOR;
+			min_b *= MUSICLIGHT_WARMUP_FACTOR;
+
+			if(energy_r > max_r) { max_r = energy_r; }
+			if(energy_g > max_g) { max_g = energy_g; }
+			if(energy_b > max_b) { max_b = energy_b; }
+
+			if(min_r <= 0) { min_r = 1.0f; }
+			if(min_g <= 0) { min_g = 1.0f; }
+			if(min_b <= 0) { min_b = 1.0f; }
+
+			if(energy_r < min_r) { min_r = energy_r; }
+			if(energy_g < min_g) { min_g = energy_g; }
+			if(energy_b < min_b) { min_b = energy_b; }
+
+			for(uint8_t i = WS2801_NUM_MODULES-1; i > 0; i--) {
+				r[i] = r[i-1];
+				g[i] = g[i-1];
+				b[i] = b[i-1];
+			}
+
+			r[0] = (energy_r - min_r) / (max_r - min_r);
+			g[0] = (energy_g - min_r) / (max_g - min_r);
+			b[0] = (energy_b - min_r) / (max_b - min_r);
+
+			cur_step = MS_APPLY;
+			return true;
+			break;
+
+		case MS_APPLY:
+			for(uint8_t i = 0; i < WS2801_NUM_MODULES; i++) {
+				ws2801_set_colour(i, r[i], g[i], b[i]);
+			}
+
+			ws2801_send_update();
+
+			cur_step = MS_WINDOW;
+			return false;
+			break;
+
+	};
+
+	return false;
 }
 
 int main(void)
@@ -205,6 +330,8 @@ int main(void)
 	struct fifo_ctx sample_fifo;
 	struct pdm2pcm_ctx pdmctx;
 
+	bool must_update = false;
+
 	init_clock();
 	init_gpio();
 	init_timer();
@@ -215,10 +342,12 @@ int main(void)
 	mp45dt02_init(mic_buf0, mic_buf1, AUDIO_BUFFER_SIZE);
 
 	fifo_init(&sample_fifo);
-	pdm2pcm_init(&pdmctx, 128); // downsampling factor -> 24 kHz
+	pdm2pcm_init(&pdmctx, 64); // downsampling factor -> 48 kHz
 
 	ws2801_init();
 	ws2801_setup_dma();
+
+	fft_init();
 
 	debug_send_string("Init complete\r\n");
 
@@ -232,21 +361,23 @@ int main(void)
 
 			if(fifo_get_level(&sample_fifo) >= SAMPLE_BUFFER_SIZE) {
 				for(uint32_t i = 0; i < SAMPLE_BUFFER_SIZE; i++) {
-					sample_buffer[i] = fifo_pop(&sample_fifo);
+					sample_buffer[i] = fifo_pop(&sample_fifo) / (float)(1 << 30);
 				}
+
+				// new samples arrived
+				must_update = true;
 			}
 
 			old_mic_buf = cur_mic_buf;
 		}
 
+		if(must_update) {
+			must_update = musiclight(tick_count, sample_buffer);
+		}
+
 		if(tick_ms == 1) {
 			tick_ms = 0;
 			tick_count++;
-
-			if((tick_count % (1000 / FPS)) == 0) {
-				//sinusfader(tick_count);
-				musiclight_mono(tick_count, sample_buffer);
-			}
 		}
 	}
 

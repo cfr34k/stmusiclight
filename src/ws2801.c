@@ -106,9 +106,10 @@ void ws2801_set_colour(uint8_t module, float red, float green, float blue)
 	//message[3*module + 1] = ~green_int;
 	//message[3*module + 2] = ~blue_int;
 
+	// non-inverted, but RBG value order
 	message[3*module + 0] = red_int;
-	message[3*module + 1] = green_int;
-	message[3*module + 2] = blue_int;
+	message[3*module + 2] = green_int;
+	message[3*module + 1] = blue_int;
 }
 
 void ws2801_send_update(void)
