@@ -204,13 +204,18 @@ enum MusiclightStep {
 	MS_WINDOW,
 	MS_FFT,
 	MS_FFT_ABS,
+	MS_FFT_DENOISE,
 	MS_EXTRACT_ENERGY,
 	MS_UPDATE_COLORS,
 	MS_APPLY
 };
 
 #define MUSICLIGHT_COOLDOWN_FACTOR 0.9995f
-#define MUSICLIGHT_WARMUP_FACTOR 1.0005f
+#define MUSICLIGHT_NOISE_COOLDOWN_FACTOR 0.999999f
+#define MUSICLIGHT_HEATUP_FACTOR 1.0002f
+#define MUSICLIGHT_OVERDRIVE 1.0f
+
+//#define COMMONMAX
 
 static bool musiclight(uint32_t tick_count, float *samples)
 {
@@ -218,22 +223,31 @@ static bool musiclight(uint32_t tick_count, float *samples)
 	static float g[WS2801_NUM_MODULES];
 	static float b[WS2801_NUM_MODULES];
 
-	static float max_r = 1.0f;
-	static float max_g = 1.0f;
-	static float max_b = 1.0f;
-
-	static float min_r = 1.0f;
-	static float min_g = 1.0f;
-	static float min_b = 1.0f;
-
 	static float energy_r = 0;
 	static float energy_g = 0;
 	static float energy_b = 0;
+
+#ifndef COMMONMAX
+	static float max_r = 1e-30f;
+	static float max_g = 1e-30f;
+	static float max_b = 1e-30f;
+#else
+	static float total_energy = 0;
+	static float max_total_energy = 0.001f;
+#endif
+
+	static float min_r = 1e30f;
+	static float min_g = 1e30f;
+	static float min_b = 1e30f;
 
 	static fft_sample local_samples[FFT_BLOCK_LEN];
 	static fft_value_type fft_re[FFT_BLOCK_LEN];
 	static fft_value_type fft_im[FFT_BLOCK_LEN];
 	static fft_value_type fft_abs[FFT_DATALEN];
+
+	static fft_value_type fft_abs_avg[FFT_DATALEN];
+
+	const fft_value_type fft_avg_alpha = 0.0005f;
 
 	static enum MusiclightStep cur_step = MS_WINDOW;
 
@@ -254,38 +268,73 @@ static bool musiclight(uint32_t tick_count, float *samples)
 
 		case MS_FFT_ABS:
 			fft_complex_to_absolute(fft_re, fft_im, fft_abs);
+			cur_step = MS_FFT_DENOISE;
+			return true;
+			break;
+
+		case MS_FFT_DENOISE:
+			// calculate a long-term average for the power in each FFT bin using an
+			// exponential averaging filter. This should mostly contain the noise
+			// power, as the signal will probably vary over time.
+			for(int i = 0; i < FFT_DATALEN; i++) {
+				fft_abs_avg[i] *= MUSICLIGHT_NOISE_COOLDOWN_FACTOR;
+				if(fft_abs[i] > fft_abs_avg[i]) {
+					fft_abs_avg[i] = fft_avg_alpha * fft_abs[i] + (1 - fft_avg_alpha) * fft_abs_avg[i];
+				}
+
+				fft_abs[i] -= fft_abs_avg[i];
+				if(fft_abs[i] < 0) {
+					fft_abs[i] = 0;
+				}
+			}
+
 			cur_step = MS_EXTRACT_ENERGY;
 			return true;
 			break;
 
 		case MS_EXTRACT_ENERGY:
+#ifdef COMMONMAX
+			energy_r = fft_get_energy_in_band(fft_abs, 0, 400) / 400;
+			energy_g = fft_get_energy_in_band(fft_abs, 400, 4000) / 3600;
+			energy_b = fft_get_energy_in_band(fft_abs, 4000, 8000) / 4000;
+#else
 			energy_r = fft_get_energy_in_band(fft_abs, 0, 400);
 			energy_g = fft_get_energy_in_band(fft_abs, 400, 4000);
-			energy_b = fft_get_energy_in_band(fft_abs, 4000, SAMPLE_RATE/2);
+			energy_b = fft_get_energy_in_band(fft_abs, 4000, 8000);
+#endif
+
+#ifdef COMMONMAX
+			total_energy = energy_r + energy_g + energy_b;
+#endif
+
 			cur_step = MS_UPDATE_COLORS;
 			return true;
 			break;
 
 		case MS_UPDATE_COLORS:
+#ifndef COMMONMAX
 			max_r *= MUSICLIGHT_COOLDOWN_FACTOR;
 			max_g *= MUSICLIGHT_COOLDOWN_FACTOR;
 			max_b *= MUSICLIGHT_COOLDOWN_FACTOR;
 
-			min_r *= MUSICLIGHT_WARMUP_FACTOR;
-			min_g *= MUSICLIGHT_WARMUP_FACTOR;
-			min_b *= MUSICLIGHT_WARMUP_FACTOR;
-
 			if(energy_r > max_r) { max_r = energy_r; }
 			if(energy_g > max_g) { max_g = energy_g; }
 			if(energy_b > max_b) { max_b = energy_b; }
+#else
+			max_total_energy *= MUSICLIGHT_COOLDOWN_FACTOR;
 
-			if(min_r <= 0) { min_r = 1.0f; }
-			if(min_g <= 0) { min_g = 1.0f; }
-			if(min_b <= 0) { min_b = 1.0f; }
+			if(total_energy > max_total_energy) { max_total_energy = total_energy; }
+#endif
+
+			/*
+			min_r *= MUSICLIGHT_HEATUP_FACTOR;
+			min_g *= MUSICLIGHT_HEATUP_FACTOR;
+			min_b *= MUSICLIGHT_HEATUP_FACTOR;
 
 			if(energy_r < min_r) { min_r = energy_r; }
 			if(energy_g < min_g) { min_g = energy_g; }
 			if(energy_b < min_b) { min_b = energy_b; }
+			*/
 
 			for(uint8_t i = WS2801_NUM_MODULES-1; i > 0; i--) {
 				r[i] = r[i-1];
@@ -293,9 +342,22 @@ static bool musiclight(uint32_t tick_count, float *samples)
 				b[i] = b[i-1];
 			}
 
-			r[0] = (energy_r - min_r) / (max_r - min_r);
-			g[0] = (energy_g - min_r) / (max_g - min_r);
-			b[0] = (energy_b - min_r) / (max_b - min_r);
+#ifndef COMMONMAX
+			//r[0] = (energy_r - min_r) / (max_r - min_r);
+			//g[0] = (energy_g - min_g) / (max_g - min_g);
+			//b[0] = (energy_b - min_b) / (max_b - min_b);
+			r[0] = energy_r / max_r;
+			g[0] = energy_g / max_g;
+			b[0] = energy_b / max_b;
+#else
+			r[0] = MUSICLIGHT_OVERDRIVE * energy_r / max_total_energy;
+			g[0] = MUSICLIGHT_OVERDRIVE * energy_g / max_total_energy;
+			b[0] = MUSICLIGHT_OVERDRIVE * energy_b / max_total_energy;
+
+			if(r[0] > 1.0f) { r[0] = 1.0f; };
+			if(g[0] > 1.0f) { g[0] = 1.0f; };
+			if(b[0] > 1.0f) { b[0] = 1.0f; };
+#endif
 
 			cur_step = MS_APPLY;
 			return true;
@@ -342,7 +404,7 @@ int main(void)
 	mp45dt02_init(mic_buf0, mic_buf1, AUDIO_BUFFER_SIZE);
 
 	fifo_init(&sample_fifo);
-	pdm2pcm_init(&pdmctx, 64); // downsampling factor -> 48 kHz
+	pdm2pcm_init(&pdmctx, 128); // downsampling factor -> 24 kHz
 
 	ws2801_init();
 	ws2801_setup_dma();
