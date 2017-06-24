@@ -210,8 +210,8 @@ enum MusiclightStep {
 	MS_APPLY
 };
 
-#define MUSICLIGHT_COOLDOWN_FACTOR 0.9995f
-#define MUSICLIGHT_NOISE_COOLDOWN_FACTOR 0.999999f
+#define MUSICLIGHT_COOLDOWN_FACTOR 0.9999f
+#define MUSICLIGHT_NOISE_COOLDOWN_FACTOR 0.99999f
 #define MUSICLIGHT_HEATUP_FACTOR 1.0002f
 #define MUSICLIGHT_OVERDRIVE 1.0f
 
@@ -236,9 +236,11 @@ static bool musiclight(uint32_t tick_count, float *samples)
 	static float max_total_energy = 0.001f;
 #endif
 
+	/*
 	static float min_r = 1e30f;
 	static float min_g = 1e30f;
 	static float min_b = 1e30f;
+	*/
 
 	static fft_sample local_samples[FFT_BLOCK_LEN];
 	static fft_value_type fft_re[FFT_BLOCK_LEN];
@@ -247,11 +249,35 @@ static bool musiclight(uint32_t tick_count, float *samples)
 
 	static fft_value_type fft_abs_avg[FFT_DATALEN];
 
-	const fft_value_type fft_avg_alpha = 0.0005f;
+	const fft_value_type fft_avg_alpha = 0.00001f;
 
 	static enum MusiclightStep cur_step = MS_WINDOW;
 
-	(void)tick_count; // avoid unused parameter warning
+	// reset 1 second after startup
+	if(tick_count <= 1000) {
+		cur_step = MS_WINDOW;
+
+		for(uint32_t i = 0; i < FFT_DATALEN; i++) {
+			fft_abs_avg[i] = 0.0f;
+		}
+
+#ifndef COMMONMAX
+		max_r = 1e-30f;
+		max_g = 1e-30f;
+		max_b = 1e-30f;
+#else
+		total_energy = 0;
+		max_total_energy = 0.001f;
+#endif
+
+		for(uint8_t i = 0; i < WS2801_NUM_MODULES; i++) {
+			ws2801_set_colour(i, 0, 0, 0);
+		}
+
+		ws2801_send_update();
+
+		return false;
+	}
 
 	switch(cur_step) {
 		case MS_WINDOW:
@@ -277,10 +303,10 @@ static bool musiclight(uint32_t tick_count, float *samples)
 			// exponential averaging filter. This should mostly contain the noise
 			// power, as the signal will probably vary over time.
 			for(int i = 0; i < FFT_DATALEN; i++) {
-				fft_abs_avg[i] *= MUSICLIGHT_NOISE_COOLDOWN_FACTOR;
-				if(fft_abs[i] > fft_abs_avg[i]) {
+				//fft_abs_avg[i] *= MUSICLIGHT_NOISE_COOLDOWN_FACTOR;
+				//if(fft_abs[i] > fft_abs_avg[i]) {
 					fft_abs_avg[i] = fft_avg_alpha * fft_abs[i] + (1 - fft_avg_alpha) * fft_abs_avg[i];
-				}
+				//}
 
 				fft_abs[i] -= fft_abs_avg[i];
 				if(fft_abs[i] < 0) {
@@ -299,8 +325,8 @@ static bool musiclight(uint32_t tick_count, float *samples)
 			energy_b = fft_get_energy_in_band(fft_abs, 4000, 8000) / 4000;
 #else
 			energy_r = fft_get_energy_in_band(fft_abs, 0, 400);
-			energy_g = fft_get_energy_in_band(fft_abs, 400, 4000);
-			energy_b = fft_get_energy_in_band(fft_abs, 4000, 8000);
+			energy_g = fft_get_energy_in_band(fft_abs, 400, 3000);
+			energy_b = fft_get_energy_in_band(fft_abs, 3000, 8000);
 #endif
 
 #ifdef COMMONMAX
@@ -336,19 +362,22 @@ static bool musiclight(uint32_t tick_count, float *samples)
 			if(energy_b < min_b) { min_b = energy_b; }
 			*/
 
-			for(uint8_t i = WS2801_NUM_MODULES-1; i > 0; i--) {
-				r[i] = r[i-1];
-				g[i] = g[i-1];
-				b[i] = b[i-1];
+			for(uint8_t i = WS2801_NUM_MODULES-1; i > 1; i-=2) {
+				r[i] = r[i-2];
+				g[i] = g[i-2];
+				b[i] = b[i-2];
+				r[i-1] = r[i-3];
+				g[i-1] = g[i-3];
+				b[i-1] = b[i-3];
 			}
 
 #ifndef COMMONMAX
 			//r[0] = (energy_r - min_r) / (max_r - min_r);
 			//g[0] = (energy_g - min_g) / (max_g - min_g);
 			//b[0] = (energy_b - min_b) / (max_b - min_b);
-			r[0] = energy_r / max_r;
-			g[0] = energy_g / max_g;
-			b[0] = energy_b / max_b;
+			r[1] = r[0] = energy_r / max_r;
+			g[1] = g[0] = energy_g / max_g;
+			b[1] = b[0] = energy_b / max_b;
 #else
 			r[0] = MUSICLIGHT_OVERDRIVE * energy_r / max_total_energy;
 			g[0] = MUSICLIGHT_OVERDRIVE * energy_g / max_total_energy;

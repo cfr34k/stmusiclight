@@ -99,7 +99,7 @@ void ws2801_set_colour(uint8_t module, float red, float green, float blue)
   // perform gamma correction and convert to integer
   uint8_t red_int   = 255.0f * red*red;
   uint8_t green_int = 255.0f * green*green;
-  uint8_t blue_int  = 255.0f * blue *blue;
+  uint8_t blue_int  = 255.0f * blue*blue;
 
   // Invert signal, as we have inverting level shifters
 	//message[3*module + 0] = ~red_int;
