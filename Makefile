@@ -37,7 +37,7 @@ CFLAGS+=-Isrc
 LDFLAGS+=-Tldscripts/stm32f4-discovery-$(BUILD).ld
 
 # Flags for libopencm3
-CM3_DIR ?= $(HOME)/code/c/stm32/libopencm3
+CM3_DIR ?= ./libopencm3
 CFLAGS+=-I$(CM3_DIR)/include
 LDFLAGS+=-L$(CM3_DIR)/lib -lopencm3_stm32f4
 
