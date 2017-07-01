@@ -9,7 +9,7 @@
 // length of the useful FFT result data (due to symmetry)
 #define FFT_DATALEN      (FFT_BLOCK_LEN/2 + 1)
 
-#define SAMPLE_RATE      24000
+#define SAMPLE_RATE      40000
 
 typedef float fft_value_type;
 typedef float fft_sample;

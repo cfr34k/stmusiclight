@@ -21,6 +21,7 @@
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/timer.h>
+#include <libopencm3/stm32/adc.h>
 #include <libopencm3/cm3/nvic.h>
 
 #include <stdio.h>
@@ -44,6 +45,9 @@
 
 volatile uint8_t tick_ms = 1;
 
+volatile struct fifo_ctx sample_fifo;
+
+
 static void init_gpio(void)
 {
 	// Set up LED outputs for PWM
@@ -51,6 +55,9 @@ static void init_gpio(void)
 			GPIO12 | GPIO13 | GPIO14 | GPIO15);
 
 	gpio_set_af(GPIOD, 2, GPIO12 | GPIO13 | GPIO14 | GPIO15);
+
+	// Set up analog input
+	gpio_mode_setup(GPIOA, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, GPIO4);
 }
 
 static void init_clock(void)
@@ -61,6 +68,9 @@ static void init_clock(void)
 	// enable GPIO clocks:
 	// Port D is needed for LEDs
 	rcc_peripheral_enable_clock(&RCC_AHB1ENR, RCC_AHB1ENR_IOPDEN);
+
+	// Port A is needed for ADC
+	rcc_peripheral_enable_clock(&RCC_AHB1ENR, RCC_AHB1ENR_IOPAEN);
 
 	// enable TIM1 clock
 	rcc_peripheral_enable_clock(&RCC_APB2ENR, RCC_APB2ENR_TIM1EN);
@@ -73,12 +83,20 @@ static void init_clock(void)
 
 	// enable TIM4 clock
 	rcc_peripheral_enable_clock(&RCC_APB1ENR, RCC_APB1ENR_TIM4EN);
+
+	// enable TIM3 clock
+	rcc_peripheral_enable_clock(&RCC_APB1ENR, RCC_APB1ENR_TIM3EN);
+
+  // enable ADC1 clock
+	//rcc_peripheral_enable_clock(&RCC_APB2ENR, RCC_APB2ENR_ADC1EN);
+	rcc_periph_clock_enable(RCC_ADC1);
 }
 
 static void init_timer(void)
 {
 	// global interrupt config
 	nvic_enable_irq(NVIC_TIM1_UP_TIM10_IRQ);
+	nvic_enable_irq(NVIC_ADC_IRQ);
 
 	// *** TIM1 ***
 
@@ -131,6 +149,50 @@ static void init_timer(void)
 
 	// GO!
 	timer_enable_counter(TIM4);
+
+	// *** TIM3 ***
+	timer_reset(TIM3);
+	timer_set_mode(TIM3, TIM_CR1_CKD_CK_INT, TIM_CR1_CMS_EDGE, TIM_CR1_DIR_UP);
+
+	// prescaler
+	timer_set_prescaler(TIM3, 120); // count up by 1 every 1 us
+
+	// auto-reload value
+	timer_set_period(TIM3, 25); // 40 kHz tick rate
+
+	timer_set_master_mode(TIM3, TIM_CR2_MMS_UPDATE);
+
+	// GO!
+	timer_enable_counter(TIM3);
+}
+
+static void init_adc(void)
+{
+	uint8_t channel = ADC_CHANNEL4;
+
+	adc_set_multi_mode(ADC_CCR_MULTI_INDEPENDENT);
+
+	adc_power_off(ADC1);
+
+	adc_disable_scan_mode(ADC1);
+	adc_set_single_conversion_mode(ADC1);
+	adc_set_sample_time_on_all_channels(ADC1, ADC_SMPR_SMP_144CYC);
+	adc_set_right_aligned(ADC1);
+	adc_set_regular_sequence(ADC1, 1, &channel);
+
+	adc_enable_external_trigger_regular(ADC1, ADC_CR2_EXTSEL_TIM3_TRGO, ADC_CR2_EXTEN_RISING_EDGE);
+	adc_enable_eoc_interrupt(ADC1);
+
+	adc_power_on(ADC1);
+
+	///* Wait for ADC starting up. */
+	//int i;
+	//for (i = 0; i < 800000; i++) /* Wait a bit. */
+	//	__asm__("nop");
+
+	//adc_reset_calibration(ADC1);
+	//adc_calibration(ADC1);
+	//adc_calibrate(ADC1);
 }
 
 static bool sinusfader(uint32_t tick_count, float *samples)
@@ -155,7 +217,7 @@ static bool musiclight_mono(uint32_t tick_count, float *samples)
 {
 	static float v[WS2801_NUM_MODULES];
 
-	static float maxrms = 1;
+	static float maxrms = 1e-10;
 
 	float avg = 0;
 	float rms = 0;
@@ -210,7 +272,7 @@ enum MusiclightStep {
 	MS_APPLY
 };
 
-#define MUSICLIGHT_COOLDOWN_FACTOR 0.9999f
+#define MUSICLIGHT_COOLDOWN_FACTOR 0.9998f
 #define MUSICLIGHT_NOISE_COOLDOWN_FACTOR 0.99999f
 #define MUSICLIGHT_HEATUP_FACTOR 1.0002f
 #define MUSICLIGHT_OVERDRIVE 1.0f
@@ -320,13 +382,17 @@ static bool musiclight(uint32_t tick_count, float *samples)
 
 		case MS_EXTRACT_ENERGY:
 #ifdef COMMONMAX
-			energy_r = fft_get_energy_in_band(fft_abs, 0, 400) / 400;
+			energy_r = fft_get_energy_in_band(fft_abs, 80, 400) / 400;
 			energy_g = fft_get_energy_in_band(fft_abs, 400, 4000) / 3600;
-			energy_b = fft_get_energy_in_band(fft_abs, 4000, 8000) / 4000;
+			energy_b = fft_get_energy_in_band(fft_abs, 4000, 10000) / 6000;
 #else
-			energy_r = fft_get_energy_in_band(fft_abs, 0, 400);
-			energy_g = fft_get_energy_in_band(fft_abs, 400, 3000);
-			energy_b = fft_get_energy_in_band(fft_abs, 3000, 8000);
+			// ignore feedback frequency from the LED stripe (2,5 kHz) and overtones
+			energy_r  = fft_get_energy_in_band(fft_abs, 0, 400);
+			energy_g  = fft_get_energy_in_band(fft_abs, 400, 2450);
+			energy_g += fft_get_energy_in_band(fft_abs, 2550, 4000);
+			energy_b  = fft_get_energy_in_band(fft_abs, 4000, 4935);
+			energy_b += fft_get_energy_in_band(fft_abs, 5065, 7420);
+			energy_b += fft_get_energy_in_band(fft_abs, 7580, 9900);
 #endif
 
 #ifdef COMMONMAX
@@ -412,28 +478,23 @@ int main(void)
 {
 	uint32_t tick_count = 0;
 
-	uint32_t mic_buf0[AUDIO_BUFFER_SIZE], mic_buf1[AUDIO_BUFFER_SIZE];
-	uint32_t *cur_mic_buf = mic_buf0;
-	uint32_t *old_mic_buf = 0;
+	//uint32_t mic_buf0[AUDIO_BUFFER_SIZE], mic_buf1[AUDIO_BUFFER_SIZE];
+	//uint32_t *cur_mic_buf = mic_buf0;
+	//uint32_t *old_mic_buf = 0;
 
 	float sample_buffer[SAMPLE_BUFFER_SIZE];
-
-	struct fifo_ctx sample_fifo;
-	struct pdm2pcm_ctx pdmctx;
 
 	bool must_update = false;
 
 	init_clock();
 	init_gpio();
+	init_adc();
 	init_timer();
 
 	debug_init();
 	tictoc_init();
 
-	mp45dt02_init(mic_buf0, mic_buf1, AUDIO_BUFFER_SIZE);
-
 	fifo_init(&sample_fifo);
-	pdm2pcm_init(&pdmctx, 128); // downsampling factor -> 24 kHz
 
 	ws2801_init();
 	ws2801_setup_dma();
@@ -442,9 +503,10 @@ int main(void)
 
 	debug_send_string("Init complete\r\n");
 
-	mp45dt02_start();
+	timer_set_oc_value(TIM4, TIM_OC1, 100);
 
 	while (1) {
+		/*
 		cur_mic_buf = mp45dt02_dma_get_current_buffer() ? mic_buf0 : mic_buf1;
 
 		if( old_mic_buf != cur_mic_buf){
@@ -460,6 +522,18 @@ int main(void)
 			}
 
 			old_mic_buf = cur_mic_buf;
+		}
+		*/
+
+		if(fifo_get_level(&sample_fifo) >= SAMPLE_BUFFER_SIZE) {
+			for(uint32_t i = 0; i < SAMPLE_BUFFER_SIZE; i++) {
+				nvic_disable_irq(NVIC_ADC_IRQ); // start critical section
+				sample_buffer[i] = fifo_pop(&sample_fifo) / (float)(1 << 12);
+				nvic_enable_irq(NVIC_ADC_IRQ); // end critical section
+			}
+
+			// new samples arrived
+			must_update = true;
 		}
 
 		if(must_update) {
@@ -482,6 +556,24 @@ void tim1_up_tim10_isr(void)
 		tick_ms = 1;
 		TIM1_SR &= ~(TIM_SR_UIF); // clear interrupt flag
 
+	}
+}
+
+#define ADC_LOWPASS_EXPONENT 18
+
+void adc_isr(void)
+{
+	static uint32_t adcavg = 2048;
+
+	uint16_t adcval;
+
+	if(adc_eoc(ADC1)) { //ADC1_SR & ADC_SR_EOC) {
+		adcval = adc_read_regular(ADC1);
+
+		adcavg = (adcavg - (adcavg >> ADC_LOWPASS_EXPONENT)) + adcval;
+
+		fifo_push(&sample_fifo, (fifo_t)adcval - (adcavg >> ADC_LOWPASS_EXPONENT));
+		//timer_set_oc_value(TIM4, TIM_OC2, adcval >> 2);
 	}
 }
 

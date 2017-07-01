@@ -20,14 +20,14 @@ struct fifo_ctx {
 
 #define FIFO_INC(x) ((x + 1) % FIFO_DEPTH)
 
-inline void fifo_init(struct fifo_ctx *ctx)
+inline void fifo_init(volatile struct fifo_ctx *ctx)
 {
 	ctx->widx = 0;
 	ctx->ridx = 0;
 	ctx->level = 0;
 }
 
-inline void fifo_push(struct fifo_ctx *ctx, fifo_t value)
+inline void fifo_push(volatile struct fifo_ctx *ctx, fifo_t value)
 {
 	uint16_t tmpidx = FIFO_INC(ctx->widx);
 
@@ -38,7 +38,7 @@ inline void fifo_push(struct fifo_ctx *ctx, fifo_t value)
 	}
 }
 
-inline fifo_t fifo_pop(struct fifo_ctx *ctx)
+inline fifo_t fifo_pop(volatile struct fifo_ctx *ctx)
 {
 	fifo_t value = 0;
 
@@ -51,7 +51,7 @@ inline fifo_t fifo_pop(struct fifo_ctx *ctx)
 	return value;
 }
 
-inline uint8_t fifo_is_empty(struct fifo_ctx *ctx)
+inline uint8_t fifo_is_empty(volatile struct fifo_ctx *ctx)
 {
 	if(ctx->widx == ctx->ridx) {
 		return 1;
@@ -60,7 +60,7 @@ inline uint8_t fifo_is_empty(struct fifo_ctx *ctx)
 	}
 }
 
-inline uint8_t fifo_is_full(struct fifo_ctx *ctx)
+inline uint8_t fifo_is_full(volatile struct fifo_ctx *ctx)
 {
 	if(FIFO_INC(ctx->widx) == ctx->ridx) {
 		return 1;
@@ -69,7 +69,7 @@ inline uint8_t fifo_is_full(struct fifo_ctx *ctx)
 	}
 }
 
-inline uint16_t fifo_get_level(struct fifo_ctx *ctx)
+inline uint16_t fifo_get_level(volatile struct fifo_ctx *ctx)
 {
 	return ctx->level;
 }
